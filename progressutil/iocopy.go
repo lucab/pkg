@@ -55,13 +55,14 @@ func (cr *copyReader) updateProgressBar() error {
 
 // NewCopyProgressPrinter returns a new CopyProgressPrinter
 func NewCopyProgressPrinter() *CopyProgressPrinter {
-	return &CopyProgressPrinter{results: make(chan error)}
+	return &CopyProgressPrinter{results: make(chan error), cancel: make(chan struct{})}
 }
 
 // CopyProgressPrinter will perform an arbitrary number of io.Copy calls, while
 // continually printing the progress of each copy.
 type CopyProgressPrinter struct {
 	results chan error
+	cancel  chan struct{}
 
 	lock    sync.Mutex
 	readers []*copyReader
@@ -100,7 +101,11 @@ func (cpp *CopyProgressPrinter) AddCopy(reader io.Reader, name string, size int6
 
 	go func() {
 		_, err := io.Copy(dest, cr)
-		cpp.results <- err
+		select {
+		case <-cpp.cancel:
+			return
+		case cpp.results <- err:
+		}
 	}()
 	return nil
 }
@@ -126,7 +131,9 @@ func (cpp *CopyProgressPrinter) PrintAndWait(printTo io.Writer, printInterval ti
 		return nil
 	}
 
+	defer close(cpp.cancel)
 	t := time.NewTicker(printInterval)
+	allDone := false
 	for i := 0; i < n; {
 		select {
 		case <-cancel:
@@ -139,7 +146,9 @@ func (cpp *CopyProgressPrinter) PrintAndWait(printTo io.Writer, printInterval ti
 		case err := <-cpp.results:
 			i++
 			if err == nil {
-				_, err = cpp.pbp.Print(printTo)
+				if !allDone {
+					allDone, err = cpp.pbp.Print(printTo)
+				}
 			}
 			if err != nil {
 				return err
